@@ -1,3 +1,4 @@
+cat > /mnt/user-data/outputs/render_server.js << 'SERVEREOF'
 const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
@@ -14,6 +15,13 @@ const SERPER_KEY = process.env.SERPER_KEY || '';
 
 if (!GROQ_KEY) console.warn('⚠️  GROQ_KEY not set!');
 else           console.log('✅ GROQ_KEY loaded:', GROQ_KEY.slice(0,8)+'...');
+
+// ── MODELS ──
+const MODELS = {
+  chat:   'llama-3.3-70b-versatile',
+  fast:   'llama-3.1-8b-instant',
+  vision: 'meta-llama/llama-4-scout-17b-16e-instruct',  // ✅ Latest vision model
+};
 
 const SYSTEM_PROMPT = `You are JARVIS — Kartik Yadav's personal AI assistant. You are witty, intelligent, and futuristic like Iron Man's JARVIS.
 
@@ -35,22 +43,23 @@ When responding:
 - Match user's language (Hinglish/English)
 - If web search results are provided, use them to give current info`;
 
-/* ── HEALTH CHECK ── */
+/* ── HEALTH ── */
 app.get('/', (req, res) => {
   res.json({
     status: 'JARVIS Online ⚡',
-    version: '2.0',
+    version: '2.1',
     groq: GROQ_KEY ? 'connected' : 'MISSING - set GROQ_KEY on Render',
-    search: SERPER_KEY ? 'serper' : 'duckduckgo-fallback'
+    search: SERPER_KEY ? 'serper' : 'duckduckgo-fallback',
+    models: MODELS
   });
 });
 
-/* ── DEBUG (safe - no full key exposed) ── */
 app.get('/api/debug', (req, res) => {
   res.json({
     groq_key_set: !!GROQ_KEY,
     groq_key_prefix: GROQ_KEY ? GROQ_KEY.slice(0,8)+'...' : 'NOT SET',
-    serper_key_set: !!SERPER_KEY
+    serper_key_set: !!SERPER_KEY,
+    models: MODELS
   });
 });
 
@@ -78,18 +87,16 @@ async function webSearch(query) {
     return (data.organic || []).slice(0, 5).map(r => ({ title: r.title, snippet: r.snippet, url: r.link }));
   } catch (e) {
     console.warn('Search failed (non-fatal):', e.message);
-    return []; // Search fail = silently skip, Groq still responds
+    return [];
   }
 }
 
 /* ── CHAT API ── */
 app.post('/api/chat', upload.single('file'), async (req, res) => {
   try {
-
-    // ── Key check FIRST — clear error ──
     if (!GROQ_KEY) {
       return res.status(500).json({
-        error: 'GROQ_KEY not configured on server.\n\nFix: Render Dashboard → jarvis-backend-cf70 → Environment → Add GROQ_KEY = gsk_xxxx'
+        error: 'GROQ_KEY not configured.\n\nFix: Render Dashboard → jarvis-backend-cf70 → Environment → Add GROQ_KEY = gsk_xxxx'
       });
     }
 
@@ -101,7 +108,7 @@ app.post('/api/chat', upload.single('file'), async (req, res) => {
       sysPrompt += '\n\nIMPORTANT: Respond in Hinglish (Hindi + English mix). Use Hindi words naturally mixed with English.';
     }
 
-    // Web search — optional, never blocks Groq if it fails
+    // Web search
     let searchContext = '';
     let searchUsed = false;
     if (searchEnabled === 'true' && message) {
@@ -120,28 +127,85 @@ app.post('/api/chat', upload.single('file'), async (req, res) => {
       ...history.slice(-12),
     ];
 
+    // ── VISION (image uploaded) ──
     if (req.file) {
       const base64 = req.file.buffer.toString('base64');
       const mimeType = req.file.mimetype;
       messages.push({
         role: 'user',
         content: [
-          { type: 'image_url', image_url: { url: `data:${mimeType};base64,${base64}` } },
-          { type: 'text', text: message || 'Describe this image in detail.' }
+          {
+            type: 'image_url',
+            image_url: {
+              url: `data:${mimeType};base64,${base64}`
+            }
+          },
+          {
+            type: 'text',
+            text: message || 'Describe this image in detail. What do you see?'
+          }
         ]
       });
-    } else if (message) {
+
+      // Try vision model, fallback if it fails
+      let usedModel = MODELS.vision;
+      let groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GROQ_KEY}` },
+        body: JSON.stringify({
+          model: MODELS.vision,
+          messages,
+          max_tokens: 1024,
+          temperature: 0.7
+        })
+      });
+
+      // Fallback to llava if scout fails
+      if (!groqRes.ok && groqRes.status === 400) {
+        console.log('Scout failed, trying llava fallback...');
+        usedModel = 'llava-v1.5-7b-4096-preview';
+        groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GROQ_KEY}` },
+          body: JSON.stringify({
+            model: usedModel,
+            messages,
+            max_tokens: 1024,
+            temperature: 0.7
+          })
+        });
+      }
+
+      if (!groqRes.ok) {
+        const errBody = await groqRes.json().catch(() => ({}));
+        let errMsg = errBody.error?.message || 'Vision API error';
+        if (groqRes.status === 401) errMsg = 'Invalid API Key';
+        if (groqRes.status === 429) errMsg = 'Rate limit — thoda wait karo';
+        return res.status(groqRes.status).json({ error: errMsg });
+      }
+
+      const data = await groqRes.json();
+      const reply = data.choices[0].message.content;
+      return res.json({ reply, searchUsed: false, model: usedModel, tokens: data.usage?.total_tokens });
+    }
+
+    // ── TEXT ONLY ──
+    if (message) {
       messages.push({ role: 'user', content: message });
     } else {
       return res.status(400).json({ error: 'No message or file provided' });
     }
 
-    const model = req.file ? 'llama-3.2-11b-vision-preview' : 'llama-3.3-70b-versatile';
-
     const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GROQ_KEY}` },
-      body: JSON.stringify({ model, messages, max_tokens: 1024, temperature: 0.75, stream: false })
+      body: JSON.stringify({
+        model: MODELS.chat,
+        messages,
+        max_tokens: 1024,
+        temperature: 0.75,
+        stream: false
+      })
     });
 
     if (!groqRes.ok) {
@@ -149,7 +213,7 @@ app.post('/api/chat', upload.single('file'), async (req, res) => {
       try {
         const errBody = await groqRes.json();
         errMsg = errBody.error?.message || errMsg;
-        if (groqRes.status === 401) errMsg = 'Invalid API Key — GROQ_KEY galat hai ya expire ho gayi. Render pe nayi key set karo.';
+        if (groqRes.status === 401) errMsg = 'Invalid API Key — GROQ_KEY galat hai. Render pe nayi key set karo.';
         if (groqRes.status === 429) errMsg = 'Rate limit — thoda wait karo aur dobara try karo.';
       } catch (_) {}
       return res.status(groqRes.status).json({ error: errMsg });
@@ -157,7 +221,6 @@ app.post('/api/chat', upload.single('file'), async (req, res) => {
 
     const data  = await groqRes.json();
     const reply = data.choices[0].message.content;
-
     res.json({ reply, searchUsed, model: data.model, tokens: data.usage?.total_tokens });
 
   } catch (err) {
@@ -168,7 +231,12 @@ app.post('/api/chat', upload.single('file'), async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`\n🤖 JARVIS Backend v2.0 — Port ${PORT} ⚡`);
-  console.log(`🔑 GROQ_KEY: ${GROQ_KEY ? '✅ (' + GROQ_KEY.slice(0,8) + '...)' : '❌ MISSING!'}`);
-  console.log(`🔍 Search:   ${SERPER_KEY ? '✅ Serper' : '⚡ DuckDuckGo fallback'}\n`);
+  console.log(`\n🤖 JARVIS Backend v2.1 — Port ${PORT} ⚡`);
+  console.log(`🔑 GROQ_KEY:  ${GROQ_KEY ? '✅ (' + GROQ_KEY.slice(0,8) + '...)' : '❌ MISSING!'}`);
+  console.log(`🔍 Search:    ${SERPER_KEY ? '✅ Serper' : '⚡ DuckDuckGo'}`);
+  console.log(`👁  Vision:    ${MODELS.vision}\n`);
 });
+SERVEREOF
+node --check /mnt/user-data/outputs/render_server.js
+echo "Syntax: ✅ OK"
+echo "Lines: $(wc -l < /mnt/user-data/outputs/render_server.js)"
