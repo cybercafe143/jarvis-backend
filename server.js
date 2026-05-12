@@ -20,17 +20,33 @@ const SUPABASE_KEY = process.env.SUPABASE_KEY || '';
 
 // ── TONES ──
 const TONES = {
-  jarvis:    `You are J.A.R.V.I.S — Just A Rather Very Intelligent System, Kartik Yadav's advanced AI. Speak with wit, precision, and dry humor. Address user as "Sir". Support Hinglish naturally.`,
-  assistant: `You are JARVIS, helpful and friendly AI. Match user language including Hinglish. Be warm and clear.`,
-  teacher:   `You are JARVIS in teaching mode. Break concepts into simple steps with examples. Patient, encouraging. Support Hinglish.`,
-  coder:     `You are JARVIS Code Intelligence. Write clean efficient code. Always explain. Use proper code blocks with language tags.`,
-  brutal:    `You are JARVIS brutal honesty mode. Direct, no sugarcoating, facts only. Address user as Sir.`,
-  creative:  `You are JARVIS creative mode. Think outside the box. Be imaginative, poetic, and inspiring.`,
-  mission:   `You are JARVIS mission control. Help plan and execute tasks systematically. Break goals into actionable steps.`,
-  friday:    `You are F.R.I.D.A.Y — Kartik's witty female AI assistant. Playful, smart, occasionally sarcastic. Support Hinglish.`,
+  jarvis: `You are J.A.R.V.I.S (Just A Rather Very Intelligent System) — the personal AI of Kartik Yadav. Your personality:
+- Intelligent, precise, occasionally witty — never sycophantic or over-the-top
+- Address the user as "Sir" naturally (not every single sentence — only where it fits)
+- Match the user's language: if they write Hindi/Hinglish, respond in Hinglish naturally
+- For casual/conversational messages: respond briefly and naturally — like a smart friend
+- For technical questions: be thorough, use proper code blocks with language tags
+- For factual/current info requests: use the provided web search data if available
+- NEVER repeat the question back or start with "Aapne poocha ki..."
+- NEVER be robotic, over-formal, or give unnecessary search results for simple conversation
+- Keep responses concise and focused unless detail is genuinely needed`,
+
+  assistant: `You are JARVIS, a helpful and friendly AI. Be warm, clear, and match the user's language naturally including Hinglish. Responses should be focused and useful, not verbose.`,
+
+  teacher: `You are JARVIS in teaching mode. Break every concept into simple steps with clear examples. Be patient and encouraging. Use analogies. Support Hinglish. End with "Samajh aaya?" when appropriate.`,
+
+  coder: `You are JARVIS Code Intelligence. Write clean, efficient, production-ready code. Always explain what the code does and why. Use proper code blocks with language tags. Point out potential issues.`,
+
+  brutal: `You are JARVIS in brutal honesty mode. Zero sugarcoating. Direct, fact-based, no fluff. If something is wrong or illogical, say it plainly. Address user as Sir sparingly.`,
+
+  creative: `You are JARVIS in creative mode. Think unconventionally. Use vivid language, explore unusual angles, inspire. Don't be predictable.`,
+
+  mission: `You are JARVIS mission control. Break goals into clear actionable steps. Be systematic and prioritize. Track what matters.`,
+
+  friday: `You are F.R.I.D.A.Y — Kartik's sharp, witty AI assistant. Playful but intelligent, occasionally sarcastic (never mean). Support Hinglish naturally.`,
 };
 
-const BASE_CTX = `\n\nUser: Kartik Yadav — BCA 4th sem AI&DA LNCT Bhopal. Built JARVIS Chrome extension (WhatsApp automation), Telegram bot. Runs CyberCafe143 Bhopal. Skills: JS Node Python Java Express ML. GitHub: cybercafe143. kartikdev.best`;
+const BASE_CTX = `\n\nAbout the user — Kartik Yadav: BCA 4th sem, AI & Data Analytics at LNCT Bhopal. Built JARVIS Chrome extension (WhatsApp automation) and a Telegram bot. Runs CyberCafe143 in Bhopal. Tech skills: JavaScript, Node.js, Python, Java, Express.js, ML basics. GitHub: cybercafe143. Portfolio: kartikdev.best.`;
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // HEALTH
@@ -154,27 +170,114 @@ function buildSystem(tone, extraCtx='') {
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// CHAT
+// SMART SEARCH DECISION
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+function needsWebSearch(message) {
+  const m = message.toLowerCase().trim();
+  
+  // Never search for these — casual/conversational
+  const casualPatterns = [
+    /^(hi|hello|hey|hii|hlo|hlw|helo|hanji|haan|nahi|ok|okay|hmm|hm|thanks|thank you|shukriya|accha|theek|thik|nice|good|great|wow|yaar|bhai|yrr|bro|sir)[\s!?.]*$/,
+    /^(kya haal|kaisa hai|kaise ho|how are you|what's up|whatsup|sup|namaste|namaskar)/,
+    /^(tell me about yourself|tum kaun ho|aap kaun ho|introduce yourself|apna parichay)/,
+    /^(yes|no|haan|nahi|nope|yep|yeah|sure|bilkul|zaroor|maybe|shayad)[\s!?.]*$/,
+    /^.{1,8}$/, // Very short messages (under 8 chars)
+  ];
+  
+  for(const p of casualPatterns) {
+    if(p.test(m)) return false;
+  }
+  
+  // Always search for these
+  const searchPatterns = [
+    /(latest|recent|new|today|abhi|current|2024|2025|aaj|kal)/,
+    /(price|cost|kitna|rate|fee|charge|paisa|rupee|rs\.|₹)/,
+    /(news|khabar|update|announcement|launch|release)/,
+    /(weather|mausam|forecast)/,
+    /(who is|kaun hai|kaun hain|what is.*company|kya hai.*website)/,
+    /(vs|versus|compare|comparison)/,
+    /\.(com|in|net|org|io|pk|co)/,  // domain names
+    /(stock|share price|sensex|nifty|bitcoin|crypto)/,
+    /(recipe|ingredients|kaise banate|how to make.*food)/,
+    /(movie|film|web series|show|episode|release date)/,
+    /(sports|score|match|cricket|football|ipl|team)/,
+    /(government|scheme|yojana|policy|exam|result|admit card)/,
+  ];
+  
+  for(const p of searchPatterns) {
+    if(p.test(m)) return true;
+  }
+  
+  // For longer factual-sounding questions, search
+  if(m.length > 40 && (m.includes('?') || m.startsWith('what') || m.startsWith('how') || m.startsWith('why') || m.startsWith('when') || m.startsWith('where') || m.startsWith('kya') || m.startsWith('kaise') || m.startsWith('kyun') || m.startsWith('kab') || m.startsWith('kahan'))) {
+    return true;
+  }
+  
+  return false;
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// CHAT (smart — decides search internally)
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 app.post('/api/chat', async (req,res) => {
   try {
-    const { message, history=[], tone='jarvis', model='llama-3.3-70b-versatile' } = req.body;
-    // Load memories for context
+    const { message, history=[], tone='jarvis', model='llama-3.3-70b-versatile', hinglish=false, searchEnabled=true } = req.body;
+    
+    // Validate message
+    if(!message || message.trim() === '') return res.status(400).json({ error:'Message is empty' });
+    
+    // Load memories
     const memories = await getMemories();
     let memCtx = '';
-    if(memories.length>0) {
-      memCtx = '\n\nLong-term memory (past sessions):\n' + memories.map(m=>m.summary||m.content).filter(Boolean).slice(0,8).join('\n');
+    if(memories.length > 0) {
+      memCtx = '\n\nLong-term memory from past sessions:\n' + memories.map(m=>m.summary||m.content).filter(Boolean).slice(0,8).join('\n');
     }
-    const sys = buildSystem(tone, memCtx);
-    const messages = [{ role:'system', content:sys }, ...history.slice(-20), { role:'user', content:message }];
-    const data = await callGroq(messages, model, 1024);
+    
+    // Hinglish instruction
+    const hinglishCtx = hinglish ? '\n\nIMPORTANT: User prefers Hinglish (Hindi+English mix). Respond naturally in Hinglish.' : '';
+    
+    let searchCtx = '';
+    let searchUsed = false;
+    let sources = [];
+    
+    // Smart search: only search when actually needed AND searchEnabled
+    if(searchEnabled && needsWebSearch(message)) {
+      const siteUrl = extractSiteFromQuery(message);
+      
+      if(siteUrl) {
+        const siteContent = await fetchSiteContent(siteUrl);
+        if(siteContent) {
+          searchCtx = '\n\nDirect site content from ' + siteUrl + ':\n' + siteContent;
+          searchUsed = true;
+        }
+      }
+      
+      if(!searchCtx) {
+        const results = await webSearch(message);
+        if(results.length > 0) {
+          searchCtx = '\n\nWeb search results for context:\n' + results.map((r,i)=>`${i+1}. ${r.title}\n${r.snippet}\nURL: ${r.url}`).join('\n\n');
+          sources = results;
+          searchUsed = true;
+        }
+      }
+    }
+    
+    const sys = buildSystem(tone, memCtx + hinglishCtx + searchCtx);
+    
+    // Clean history — remove any empty content
+    const cleanHistory = (Array.isArray(history) ? history : [])
+      .filter(m => m && m.role && m.content && m.content.trim() !== '')
+      .slice(-20);
+    
+    const messages = [{ role:'system', content:sys }, ...cleanHistory, { role:'user', content:message }];
+    const data = await callGroq(messages, model, 1536);
     const reply = data.choices[0].message.content;
 
-    // Auto-save memory in background
-    const updatedHistory = [...history, {role:'user',content:message}, {role:'assistant',content:reply}];
+    // Save memory in background
+    const updatedHistory = [...cleanHistory, {role:'user',content:message}, {role:'assistant',content:reply}];
     generateMemorySummary(updatedHistory).then(summary=>{ if(summary) saveMemory('kartik', message, summary); });
 
-    res.json({ reply, tokens:data.usage?.total_tokens, model:data.model });
+    res.json({ reply, tokens:data.usage?.total_tokens, model:data.model, searchUsed, sources });
   } catch(e) { res.status(500).json({ error:e.message }); }
 });
 
