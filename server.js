@@ -222,18 +222,110 @@ app.post('/api/chat/stream', async (req,res) => {
 });
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// WEB SEARCH ENDPOINT
+// SITE FETCHER HELPER
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+async function fetchSiteContent(url) {
+  try {
+    // Ensure URL has protocol
+    if(!url.startsWith('http')) url = 'https://' + url;
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+      timeout: 10000
+    });
+    if(!res.ok) return null;
+    const html = await res.text();
+    // Strip HTML tags but keep structure
+    let text = html
+      .replace(/<script[\s\S]*?<\/script>/gi, '')
+      .replace(/<style[\s\S]*?<\/style>/gi, '')
+      .replace(/<nav[\s\S]*?<\/nav>/gi, '')
+      .replace(/<footer[\s\S]*?<\/footer>/gi, '')
+      .replace(/<header[\s\S]*?<\/header>/gi, '')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\s{3,}/g, '\n')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .trim();
+    // Limit to 8000 chars to stay within token limits
+    return text.slice(0, 8000);
+  } catch(e) {
+    return null;
+  }
+}
+
+// Detect if query is about a specific website
+function extractSiteFromQuery(query) {
+  const q = query.toLowerCase().trim();
+  // Match patterns like "hammadtools.com", "about xyz.com", "xyz site info", "xyz website"
+  const domainMatch = query.match(/([a-zA-Z0-9-]+\.(com|in|net|org|co|io|pk|me|store|shop|xyz|dev|tech|online)(\.[a-z]{2})?)/i);
+  if(domainMatch) return domainMatch[0];
+  return null;
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// WEB SEARCH ENDPOINT (upgraded with site analyzer)
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 app.post('/api/search', async (req,res) => {
   try {
     const { query, tone='jarvis', model='llama-3.3-70b-versatile' } = req.body;
+
+    // Check if user is asking about a specific site
+    const siteUrl = extractSiteFromQuery(query);
+    let siteContent = null;
+    let siteAnalysisCtx = '';
+
+    if(siteUrl) {
+      // Try to fetch the actual site
+      siteContent = await fetchSiteContent(siteUrl);
+      if(siteContent) {
+        siteAnalysisCtx = `\n\nDIRECT SITE CONTENT from ${siteUrl}:\n${siteContent}\n\n`;
+      }
+    }
+
+    // Always also do web search for extra context
     const results = await webSearch(query);
-    const searchCtx = results.length>0
-      ? `\n\nReal-time web results for "${query}":\n`+results.map((r,i)=>`${i+1}. ${r.title}\n${r.snippet}\nURL: ${r.url}`).join('\n\n')
-      : '\n\nNo web results found.';
-    const sys = buildSystem(tone, searchCtx);
-    const data = await callGroq([{role:'system',content:sys},{role:'user',content:`Answer based on search results: ${query}`}], model, 1024);
-    res.json({ reply:data.choices[0].message.content, sources:results, tokens:data.usage?.total_tokens });
+    const searchSnippets = results.length > 0
+      ? results.map((r,i)=>`${i+1}. ${r.title}\n${r.snippet}\nURL: ${r.url}`).join('\n\n')
+      : 'No additional results found.';
+
+    const fullCtx = siteAnalysisCtx
+      ? `${siteAnalysisCtx}\nAdditional web search results:\n${searchSnippets}`
+      : `\n\nReal-time web results for "${query}":\n${searchSnippets}`;
+
+    const sys = buildSystem(tone, fullCtx);
+
+    // Special prompt for site analysis
+    const userPrompt = siteContent
+      ? `Analyze the website ${siteUrl} thoroughly. Extract and present ALL of the following IN DETAIL:
+1. 💼 What does this site/business do? (full description)
+2. 💰 PRICE LIST — List every product/service with exact prices found
+3. 📞 Contact Info — Phone numbers, WhatsApp, email, address
+4. 🌐 Social media links (Instagram, Facebook, etc.)
+5. 📦 Services/Products offered (complete list)
+6. ⭐ Any offers, discounts, or special deals
+7. 🕐 Working hours (if mentioned)
+8. 📍 Location/City
+Format clearly with sections. If any info is missing from the site, mention "Not found on site".`
+      : `Answer based on search results: ${query}`;
+
+    const data = await callGroq(
+      [{role:'system',content:sys},{role:'user',content:userPrompt}],
+      model, 2048
+    );
+
+    res.json({
+      reply: data.choices[0].message.content,
+      sources: results,
+      siteAnalyzed: siteUrl || null,
+      tokens: data.usage?.total_tokens
+    });
   } catch(e){ res.status(500).json({error:e.message}); }
 });
 
