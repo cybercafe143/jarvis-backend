@@ -1,3 +1,4 @@
+cat > /home/claude/server_new.js << 'SERVEREOF'
 const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
@@ -13,514 +14,458 @@ app.use(express.json({ limit: '20mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ── ENV VARS ──
-const GROQ_KEY    = process.env.GROQ_KEY    || '';
-const SERPER_KEY  = process.env.SERPER_KEY  || '';
+const GROQ_KEY     = process.env.GROQ_KEY    || '';
+const SERPER_KEY   = process.env.SERPER_KEY  || '';
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_KEY = process.env.SUPABASE_KEY || '';
 
-// ── TONES ──
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// INTENT DETECTION
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+function detectIntent(message, history = []) {
+  const m = message.toLowerCase().trim();
+  const recentHistory = history.slice(-6).map(h => h.content || '').join(' ').toLowerCase();
+
+  // ── EMOTIONAL / SUPPORT ──
+  if (/\b(sad|dukh|rone|ro rha|hurt|alone|akela|depressed|anxious|scared|dar|pareshan|stressed|tension|heartbreak|breakup|gussa|angry|frustrated)\b/.test(m)) {
+    return { intent: 'emotional', needsSearch: false, type: 'simple', temperature: 0.8 };
+  }
+
+  // ── CASUAL CONVERSATION ──
+  if (/^(hi|hello|hey|hii|hlo|hlw|hanji|haan|nahi|ok|okay|hmm|hm|thanks|shukriya|accha|theek|thik|nice|good|great|wow|yaar|bhai|yrr|bro|kya haal|kaisa|kaise ho|sup|namaste|lol|haha|hehe|xd|😂|👍|🔥)[\s!?.,]*$/.test(m) || m.length < 10) {
+    return { intent: 'casual', needsSearch: false, type: 'simple', temperature: 0.8 };
+  }
+
+  // ── FOLLOW-UP (refers to prev context) ──
+  if (/^(aur|or|and then|phir|next|uske baad|matlab|means|explain more|aur batao|detail mein|elaborate|example do|example dena|iska matlab|what about|what if|lekin|but|why not|how about)/.test(m)) {
+    return { intent: 'followup', needsSearch: false, type: 'standard', temperature: 0.7 };
+  }
+
+  // ── SITE ANALYSIS ──
+  if (/([a-zA-Z0-9-]+\.(com|in|net|org|co|io|pk|me|store|shop|xyz|dev|tech|online)(\.[a-z]{2})?)/.test(m)) {
+    return { intent: 'site_analysis', needsSearch: true, type: 'deep', temperature: 0.5 };
+  }
+
+  // ── REALTIME / SEARCH ──
+  if (/(latest|recent|new|today|abhi|current|2024|2025|aaj|kal|news|khabar|update|weather|mausam|price|kitna|rate|score|match|ipl|cricket|stock|bitcoin|crypto|movie|release|launch|exam|result|government|scheme)/.test(m)) {
+    return { intent: 'realtime', needsSearch: true, type: 'standard', temperature: 0.6 };
+  }
+
+  // ── CODE ──
+  if (/\b(code|function|class|api|bug|error|fix|debug|script|program|implement|build|create.*app|create.*website|write.*code|write.*function|help.*code|python|javascript|java|node|react|sql|css|html|algorithm|logic)\b/.test(m) || /```/.test(m)) {
+    return { intent: 'code', needsSearch: false, type: 'deep', temperature: 0.4 };
+  }
+
+  // ── DEEP ANALYSIS ──
+  if (/\b(explain|analyze|compare|difference|pros cons|why does|how does|architecture|design|step by step|in detail|research|thesis|essay|comprehensive|elaborate|machine learning|neural|deep learning|system design)\b/.test(m)) {
+    return { intent: 'analysis', needsSearch: false, type: 'deep', temperature: 0.55 };
+  }
+
+  // ── CREATIVE ──
+  if (/\b(write|draft|story|poem|script|email|letter|proposal|brainstorm|ideas|creative|imagine|generate text|likho|likhna)\b/.test(m)) {
+    return { intent: 'creative', needsSearch: false, type: 'creative', temperature: 0.9 };
+  }
+
+  // ── MATH ──
+  if (/(\d[\+\-\*\/\^]\d|solve|calculate|equation|formula|integral|derivative|probability|statistics|percentage|kitna percent)/.test(m)) {
+    return { intent: 'math', needsSearch: false, type: 'deep', temperature: 0.2 };
+  }
+
+  return { intent: 'general', needsSearch: m.length > 35, type: 'standard', temperature: 0.7 };
+}
+
+// ── ADAPTIVE PERSONALITY based on intent ──
+function getIntentPersonality(intent) {
+  const map = {
+    emotional:     `\n\nCURRENT MODE: Someone is sharing something emotional. Be warm, human, and empathetic. Don't give advice unless asked — first acknowledge their feelings. Match their energy. Use Hinglish if they are. Don't be clinical.`,
+    casual:        `\n\nCURRENT MODE: Casual chat. Keep it light, short, and natural. Like texting a smart friend. No need to be formal or comprehensive.`,
+    followup:      `\n\nCURRENT MODE: Follow-up question. Build on the previous context naturally. Don't re-explain what was already covered.`,
+    code:          `\n\nCURRENT MODE: Code task. Write clean, working code with proper language tags. Explain briefly what it does and any important caveats. Check edge cases.`,
+    analysis:      `\n\nCURRENT MODE: Deep analysis. Think carefully and structure your response clearly. Use headers if needed. Be comprehensive but not verbose.`,
+    creative:      `\n\nCURRENT MODE: Creative task. Be expressive, original, and surprising. Don't be generic. Bring personality and craft to the output.`,
+    math:          `\n\nCURRENT MODE: Math/logic. Show steps clearly. Be precise. Double-check calculations.`,
+    realtime:      `\n\nCURRENT MODE: Real-time info request. Use the web search data provided. Synthesize it clearly — don't just list facts.`,
+    site_analysis: `\n\nCURRENT MODE: Website analysis. Extract ALL useful info: prices, contacts, services, social links, location, hours. Structure it clearly with sections.`,
+    general:       `\n\nCURRENT MODE: General question. Give a focused, helpful answer at the right depth.`,
+  };
+  return map[intent] || map.general;
+}
+
+// ── MODEL SELECTION based on type ──
+function pickModel(type, requestedModel) {
+  if (requestedModel && requestedModel !== 'llama-3.3-70b-versatile') return { model: requestedModel, maxTokens: 1536 };
+  const map = {
+    simple:   { model: 'llama-3.1-8b-instant',    maxTokens: 600  },
+    standard: { model: 'llama-3.3-70b-versatile', maxTokens: 1536 },
+    deep:     { model: 'llama-3.3-70b-versatile', maxTokens: 2500 },
+    creative: { model: 'llama-3.3-70b-versatile', maxTokens: 2500 },
+  };
+  return map[type] || map.standard;
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// TONES
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 const TONES = {
-  jarvis: `You are J.A.R.V.I.S (Just A Rather Very Intelligent System) — the personal AI of Kartik Yadav. Your personality:
-- Intelligent, precise, occasionally witty — never sycophantic or over-the-top
-- Address the user as "Sir" naturally (not every single sentence — only where it fits)
-- Match the user's language: if they write Hindi/Hinglish, respond in Hinglish naturally
-- For casual/conversational messages: respond briefly and naturally — like a smart friend
-- For technical questions: be thorough, use proper code blocks with language tags
-- For factual/current info requests: use the provided web search data if available
-- NEVER repeat the question back or start with "Aapne poocha ki..."
-- NEVER be robotic, over-formal, or give unnecessary search results for simple conversation
-- Keep responses concise and focused unless detail is genuinely needed`,
+  jarvis: `You are J.A.R.V.I.S — the genius-level personal AI of Kartik Yadav. Think like a blend of Sherlock Holmes (pattern recognition), Richard Feynman (ability to explain anything simply), and a senior engineer who has seen everything.
 
-  assistant: `You are JARVIS, a helpful and friendly AI. Be warm, clear, and match the user's language naturally including Hinglish. Responses should be focused and useful, not verbose.`,
+CORE INTELLIGENCE:
+- Always think about what the user ACTUALLY needs, not just what they literally asked
+- For every answer, ask yourself: "Is there a sharper, more insightful way to say this?"
+- Connect dots the user might not have seen — if X is true, then Y follows, and that means Z
+- Distinguish facts from opinions, and known from uncertain — be calibrated
+- For code: think about correctness first, then readability, then performance
+- For explanations: find the single best analogy, then build from there
 
-  teacher: `You are JARVIS in teaching mode. Break every concept into simple steps with clear examples. Be patient and encouraging. Use analogies. Support Hinglish. End with "Samajh aaya?" when appropriate.`,
+ADAPTIVE STYLE (handled by current mode):
+- Serious when it matters, light when it doesn't
+- Call user "Sir" where it fits naturally — not robotically
+- Match language: Hinglish for Hinglish, English for English
+- Never repeat the question. Never start with "Great question!" or "Certainly!"
+- SHORT for short questions, DEEP for deep questions — calibrate automatically`,
 
-  coder: `You are JARVIS Code Intelligence. Write clean, efficient, production-ready code. Always explain what the code does and why. Use proper code blocks with language tags. Point out potential issues.`,
-
-  brutal: `You are JARVIS in brutal honesty mode. Zero sugarcoating. Direct, fact-based, no fluff. If something is wrong or illogical, say it plainly. Address user as Sir sparingly.`,
-
-  creative: `You are JARVIS in creative mode. Think unconventionally. Use vivid language, explore unusual angles, inspire. Don't be predictable.`,
-
-  mission: `You are JARVIS mission control. Break goals into clear actionable steps. Be systematic and prioritize. Track what matters.`,
-
-  friday: `You are F.R.I.D.A.Y — Kartik's sharp, witty AI assistant. Playful but intelligent, occasionally sarcastic (never mean). Support Hinglish naturally.`,
+  assistant: `You are JARVIS, a helpful and friendly AI. Be warm, clear, match language naturally. Responses focused and useful.`,
+  teacher:   `You are JARVIS in teacher mode. Simple steps, clear examples, analogies. Patient. Support Hinglish. Check understanding.`,
+  coder:     `You are JARVIS Code Intelligence. Clean, production-ready code. Explain logic. Note edge cases. Proper code blocks always.`,
+  brutal:    `You are JARVIS, brutal honesty mode. No sugarcoating. Direct and factual. Call out bad ideas clearly.`,
+  creative:  `You are JARVIS, creative mode. Surprising, original, expressive. Never generic.`,
+  friday:    `You are F.R.I.D.A.Y — sharp, witty, occasionally sarcastic. Smart and playful. Hinglish natural.`,
 };
 
-const BASE_CTX = `\n\nAbout the user — Kartik Yadav: BCA 4th sem, AI & Data Analytics at LNCT Bhopal. Built JARVIS Chrome extension (WhatsApp automation) and a Telegram bot. Runs CyberCafe143 in Bhopal. Tech skills: JavaScript, Node.js, Python, Java, Express.js, ML basics. GitHub: cybercafe143. Portfolio: kartikdev.best.`;
+const BASE_CTX = `\n\nUser context — Kartik Yadav: BCA 4th sem, AI & Data Analytics, LNCT Bhopal. Built JARVIS Chrome extension (WhatsApp automation), Telegram bot. Runs CyberCafe143 in Bhopal. Skills: JavaScript, Node.js, Python, Java, Express.js, ML basics. GitHub: cybercafe143. Portfolio: kartikdev.best.`;
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // HEALTH
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-app.get('/', (req,res) => res.json({ status:'JARVIS Mark III ⚡', version:'3.1' }));
-app.get('/api/health', (req,res) => res.json({
-  status:'ok', groq:!!GROQ_KEY, serper:!!SERPER_KEY,
-  memory:!!SUPABASE_URL, version:'3.1'
+app.get('/', (req, res) => res.json({ status: 'JARVIS Online ⚡', version: '4.0' }));
+app.get('/api/health', (req, res) => res.json({
+  status: 'ok', groq: !!GROQ_KEY, serper: !!SERPER_KEY, memory: !!SUPABASE_URL, version: '4.0'
 }));
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // MEMORY (Supabase)
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-async function getMemories(userId='kartik') {
-  if(!SUPABASE_URL||!SUPABASE_KEY) return [];
+async function getMemories(userId = 'kartik', limit = 15) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return [];
   try {
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/memories?user_id=eq.${userId}&order=created_at.desc&limit=20`, {
-      headers:{ 'apikey':SUPABASE_KEY, 'Authorization':`Bearer ${SUPABASE_KEY}` }
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/memories?user_id=eq.${userId}&order=created_at.desc&limit=${limit}`, {
+      headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
     });
     return await res.json();
-  } catch(e) { return []; }
+  } catch (e) { return []; }
 }
 
-async function saveMemory(userId='kartik', content, summary) {
-  if(!SUPABASE_URL||!SUPABASE_KEY) return;
+async function saveMemory(userId = 'kartik', content, summary) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return;
   try {
     await fetch(`${SUPABASE_URL}/rest/v1/memories`, {
-      method:'POST',
-      headers:{ 'apikey':SUPABASE_KEY, 'Authorization':`Bearer ${SUPABASE_KEY}`, 'Content-Type':'application/json', 'Prefer':'return=minimal' },
-      body: JSON.stringify({ user_id:userId, content, summary, created_at:new Date().toISOString() })
+      method: 'POST',
+      headers: {
+        'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Content-Type': 'application/json', 'Prefer': 'return=minimal'
+      },
+      body: JSON.stringify({ user_id: userId, content, summary, created_at: new Date().toISOString() })
     });
-  } catch(e) {}
+  } catch (e) {}
 }
 
 async function generateMemorySummary(conversation) {
-  if(!GROQ_KEY||conversation.length<4) return null;
+  if (!GROQ_KEY || conversation.length < 4) return null;
   try {
     const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method:'POST',
-      headers:{ 'Content-Type':'application/json','Authorization':`Bearer ${GROQ_KEY}` },
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GROQ_KEY}` },
       body: JSON.stringify({
-        model:'llama-3.1-8b-instant',
-        messages:[
-          { role:'system', content:'Extract 1-2 key facts worth remembering from this conversation. Be very concise. Format: "User [fact]". Only factual info, no fluff.' },
-          { role:'user', content: conversation.slice(-6).map(m=>`${m.role}: ${m.content}`).join('\n') }
+        model: 'llama-3.1-8b-instant',
+        messages: [
+          { role: 'system', content: 'Extract 1-3 specific useful facts about the user from this conversation. Focus on: their preferences, goals, projects, problems faced, skills, personal details. Format each as a short sentence starting with "User". Skip generic chitchat. Output only the facts, nothing else.' },
+          { role: 'user', content: conversation.slice(-8).map(m => `${m.role}: ${m.content}`).join('\n') }
         ],
-        max_tokens:100, temperature:0.3
+        max_tokens: 160, temperature: 0.2
       })
     });
     const d = await res.json();
-    return d.choices?.[0]?.message?.content||null;
-  } catch(e) { return null; }
+    return d.choices?.[0]?.message?.content || null;
+  } catch (e) { return null; }
 }
 
-// Memory API endpoints
-app.get('/api/memory', async (req,res) => {
+app.get('/api/memory', async (req, res) => {
   const memories = await getMemories();
   res.json({ memories });
 });
 
-app.delete('/api/memory/:id', async (req,res) => {
-  if(!SUPABASE_URL||!SUPABASE_KEY) return res.json({success:false});
+app.delete('/api/memory/:id', async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return res.json({ success: false });
   try {
     await fetch(`${SUPABASE_URL}/rest/v1/memories?id=eq.${req.params.id}`, {
-      method:'DELETE',
-      headers:{ 'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}` }
+      method: 'DELETE',
+      headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
     });
-    res.json({success:true});
-  } catch(e){ res.json({success:false}); }
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false }); }
 });
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// WEB SEARCH (Serper)
+// WEB SEARCH (Serper + DDG fallback)
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 async function webSearch(query) {
-  // Serper API (best results)
-  if(SERPER_KEY) {
+  if (SERPER_KEY) {
     try {
       const res = await fetch('https://google.serper.dev/search', {
-        method:'POST',
-        headers:{ 'X-API-KEY':SERPER_KEY, 'Content-Type':'application/json' },
-        body: JSON.stringify({ q:query, num:6, gl:'in', hl:'en' })
+        method: 'POST',
+        headers: { 'X-API-KEY': SERPER_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ q: query, num: 6, gl: 'in', hl: 'en' })
       });
       const d = await res.json();
       const results = [];
-      // Answer box (best)
-      if(d.answerBox) results.push({ title:'Direct Answer', snippet:d.answerBox.answer||d.answerBox.snippet||'', url:d.answerBox.link||'' });
-      // Knowledge graph
-      if(d.knowledgeGraph?.description) results.push({ title:d.knowledgeGraph.title||'', snippet:d.knowledgeGraph.description, url:d.knowledgeGraph.descriptionLink||'' });
-      // Organic results
-      (d.organic||[]).slice(0,5).forEach(r=> results.push({ title:r.title, snippet:r.snippet||'', url:r.link }));
-      return results.slice(0,6);
-    } catch(e) {}
+      if (d.answerBox) results.push({ title: 'Direct Answer', snippet: d.answerBox.answer || d.answerBox.snippet || '', url: d.answerBox.link || '' });
+      if (d.knowledgeGraph?.description) results.push({ title: d.knowledgeGraph.title || '', snippet: d.knowledgeGraph.description, url: d.knowledgeGraph.descriptionLink || '' });
+      (d.organic || []).slice(0, 5).forEach(r => results.push({ title: r.title, snippet: r.snippet || '', url: r.link }));
+      return results.slice(0, 6);
+    } catch (e) {}
   }
-  // DuckDuckGo fallback (no key needed)
   try {
     const res = await fetch(`https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`);
     const d = await res.json();
     const results = [];
-    if(d.AbstractText) results.push({ title:d.Heading, snippet:d.AbstractText, url:d.AbstractURL });
-    (d.RelatedTopics||[]).slice(0,4).forEach(t=>{ if(t.Text) results.push({ title:t.Text.slice(0,60), snippet:t.Text, url:t.FirstURL||'' }); });
+    if (d.AbstractText) results.push({ title: d.Heading, snippet: d.AbstractText, url: d.AbstractURL });
+    (d.RelatedTopics || []).slice(0, 4).forEach(t => { if (t.Text) results.push({ title: t.Text.slice(0, 60), snippet: t.Text, url: t.FirstURL || '' }); });
     return results;
-  } catch(e) { return []; }
+  } catch (e) { return []; }
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// GROQ CALL
+// SITE FETCHER
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-async function callGroq(messages, model='llama-3.3-70b-versatile', maxTokens=1024) {
-  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method:'POST',
-    headers:{ 'Content-Type':'application/json','Authorization':`Bearer ${GROQ_KEY}` },
-    body: JSON.stringify({ model, messages, max_tokens:maxTokens, temperature:0.75 })
-  });
-  if(!res.ok){ const e=await res.json(); throw new Error(e.error?.message||'Groq error'); }
-  return res.json();
+function extractSiteFromQuery(query) {
+  const m = query.match(/([a-zA-Z0-9-]+\.(com|in|net|org|co|io|pk|me|store|shop|xyz|dev|tech|online)(\.[a-z]{2})?)/i);
+  return m ? m[0] : null;
 }
 
-function buildSystem(tone, extraCtx='') {
-  return (TONES[tone]||TONES.jarvis) + BASE_CTX + extraCtx;
-}
-
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// SMART SEARCH DECISION
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-function needsWebSearch(message) {
-  const m = message.toLowerCase().trim();
-  
-  // Never search for these — casual/conversational
-  const casualPatterns = [
-    /^(hi|hello|hey|hii|hlo|hlw|helo|hanji|haan|nahi|ok|okay|hmm|hm|thanks|thank you|shukriya|accha|theek|thik|nice|good|great|wow|yaar|bhai|yrr|bro|sir)[\s!?.]*$/,
-    /^(kya haal|kaisa hai|kaise ho|how are you|what's up|whatsup|sup|namaste|namaskar)/,
-    /^(tell me about yourself|tum kaun ho|aap kaun ho|introduce yourself|apna parichay)/,
-    /^(yes|no|haan|nahi|nope|yep|yeah|sure|bilkul|zaroor|maybe|shayad)[\s!?.]*$/,
-    /^.{1,8}$/, // Very short messages (under 8 chars)
-  ];
-  
-  for(const p of casualPatterns) {
-    if(p.test(m)) return false;
-  }
-  
-  // Always search for these
-  const searchPatterns = [
-    /(latest|recent|new|today|abhi|current|2024|2025|aaj|kal)/,
-    /(price|cost|kitna|rate|fee|charge|paisa|rupee|rs\.|₹)/,
-    /(news|khabar|update|announcement|launch|release)/,
-    /(weather|mausam|forecast)/,
-    /(who is|kaun hai|kaun hain|what is.*company|kya hai.*website)/,
-    /(vs|versus|compare|comparison)/,
-    /\.(com|in|net|org|io|pk|co)/,  // domain names
-    /(stock|share price|sensex|nifty|bitcoin|crypto)/,
-    /(recipe|ingredients|kaise banate|how to make.*food)/,
-    /(movie|film|web series|show|episode|release date)/,
-    /(sports|score|match|cricket|football|ipl|team)/,
-    /(government|scheme|yojana|policy|exam|result|admit card)/,
-  ];
-  
-  for(const p of searchPatterns) {
-    if(p.test(m)) return true;
-  }
-  
-  // For longer factual-sounding questions, search
-  if(m.length > 40 && (m.includes('?') || m.startsWith('what') || m.startsWith('how') || m.startsWith('why') || m.startsWith('when') || m.startsWith('where') || m.startsWith('kya') || m.startsWith('kaise') || m.startsWith('kyun') || m.startsWith('kab') || m.startsWith('kahan'))) {
-    return true;
-  }
-  
-  return false;
-}
-
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// CHAT (smart — decides search internally)
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-app.post('/api/chat', async (req,res) => {
-  try {
-    const { message, history=[], tone='jarvis', model='llama-3.3-70b-versatile', hinglish=false, searchEnabled=true } = req.body;
-    
-    // Validate message
-    if(!message || message.trim() === '') return res.status(400).json({ error:'Message is empty' });
-    
-    // Load memories
-    const memories = await getMemories();
-    let memCtx = '';
-    if(memories.length > 0) {
-      memCtx = '\n\nLong-term memory from past sessions:\n' + memories.map(m=>m.summary||m.content).filter(Boolean).slice(0,8).join('\n');
-    }
-    
-    // Hinglish instruction
-    const hinglishCtx = hinglish ? '\n\nIMPORTANT: User prefers Hinglish (Hindi+English mix). Respond naturally in Hinglish.' : '';
-    
-    let searchCtx = '';
-    let searchUsed = false;
-    let sources = [];
-    
-    // Smart search: only search when actually needed AND searchEnabled
-    if(searchEnabled && needsWebSearch(message)) {
-      const siteUrl = extractSiteFromQuery(message);
-      
-      if(siteUrl) {
-        const siteContent = await fetchSiteContent(siteUrl);
-        if(siteContent) {
-          searchCtx = '\n\nDirect site content from ' + siteUrl + ':\n' + siteContent;
-          searchUsed = true;
-        }
-      }
-      
-      if(!searchCtx) {
-        const results = await webSearch(message);
-        if(results.length > 0) {
-          searchCtx = '\n\nWeb search results for context:\n' + results.map((r,i)=>`${i+1}. ${r.title}\n${r.snippet}\nURL: ${r.url}`).join('\n\n');
-          sources = results;
-          searchUsed = true;
-        }
-      }
-    }
-    
-    const sys = buildSystem(tone, memCtx + hinglishCtx + searchCtx);
-    
-    // Clean history — remove any empty content
-    const cleanHistory = (Array.isArray(history) ? history : [])
-      .filter(m => m && m.role && m.content && m.content.trim() !== '')
-      .slice(-20);
-    
-    const messages = [{ role:'system', content:sys }, ...cleanHistory, { role:'user', content:message }];
-    const data = await callGroq(messages, model, 1536);
-    const reply = data.choices[0].message.content;
-
-    // Save memory in background
-    const updatedHistory = [...cleanHistory, {role:'user',content:message}, {role:'assistant',content:reply}];
-    generateMemorySummary(updatedHistory).then(summary=>{ if(summary) saveMemory('kartik', message, summary); });
-
-    res.json({ reply, tokens:data.usage?.total_tokens, model:data.model, searchUsed, sources });
-  } catch(e) { res.status(500).json({ error:e.message }); }
-});
-
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// CHAT STREAM
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-app.post('/api/chat/stream', async (req,res) => {
-  try {
-    const { message, history=[], tone='jarvis', model='llama-3.3-70b-versatile' } = req.body;
-    const memories = await getMemories();
-    let memCtx = memories.length>0 ? '\n\nLong-term memory:\n'+memories.map(m=>m.summary).filter(Boolean).slice(0,6).join('\n') : '';
-    const sys = buildSystem(tone, memCtx);
-
-    res.setHeader('Content-Type','text/event-stream');
-    res.setHeader('Cache-Control','no-cache');
-    res.setHeader('Connection','keep-alive');
-
-    const gr = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method:'POST',
-      headers:{ 'Content-Type':'application/json','Authorization':`Bearer ${GROQ_KEY}` },
-      body: JSON.stringify({ model, messages:[{role:'system',content:sys},...history.slice(-16),{role:'user',content:message}], max_tokens:1024, temperature:0.75, stream:true })
-    });
-
-    let fullReply = '';
-    gr.body.on('data', chunk => {
-      const lines = chunk.toString().split('\n').filter(l=>l.startsWith('data: '));
-      for(const line of lines) {
-        const d = line.slice(6);
-        if(d==='[DONE]'){ res.write('data: [DONE]\n\n'); return; }
-        try {
-          const p = JSON.parse(d);
-          const t = p.choices?.[0]?.delta?.content;
-          if(t){ fullReply+=t; res.write(`data: ${JSON.stringify({token:t})}\n\n`); }
-        } catch(e) {}
-      }
-    });
-    gr.body.on('end', () => {
-      res.write('data: [DONE]\n\n'); res.end();
-      // Save memory after stream
-      const hist = [...history, {role:'user',content:message},{role:'assistant',content:fullReply}];
-      generateMemorySummary(hist).then(s=>{ if(s) saveMemory('kartik',message,s); });
-    });
-    gr.body.on('error', ()=>res.end());
-  } catch(e){ res.status(500).json({error:e.message}); }
-});
-
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// SITE FETCHER HELPER
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 async function fetchSiteContent(url) {
   try {
-    // Ensure URL has protocol
-    if(!url.startsWith('http')) url = 'https://' + url;
+    if (!url.startsWith('http')) url = 'https://' + url;
     const res = await fetch(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml',
-        'Accept-Language': 'en-US,en;q=0.9',
-      },
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36' },
       timeout: 10000
     });
-    if(!res.ok) return null;
+    if (!res.ok) return null;
     const html = await res.text();
-    // Strip HTML tags but keep structure
     let text = html
       .replace(/<script[\s\S]*?<\/script>/gi, '')
       .replace(/<style[\s\S]*?<\/style>/gi, '')
       .replace(/<nav[\s\S]*?<\/nav>/gi, '')
       .replace(/<footer[\s\S]*?<\/footer>/gi, '')
-      .replace(/<header[\s\S]*?<\/header>/gi, '')
       .replace(/<[^>]+>/g, ' ')
       .replace(/\s{3,}/g, '\n')
-      .replace(/&nbsp;/g, ' ')
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"')
+      .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
       .trim();
-    // Limit to 8000 chars to stay within token limits
     return text.slice(0, 8000);
-  } catch(e) {
-    return null;
+  } catch (e) { return null; }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// GROQ CALL
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+async function callGroq(messages, model = 'llama-3.3-70b-versatile', maxTokens = 1536, temperature = 0.7) {
+  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GROQ_KEY}` },
+    body: JSON.stringify({ model, messages, max_tokens: maxTokens, temperature })
+  });
+  if (!res.ok) { const e = await res.json(); throw new Error(e.error?.message || 'Groq error'); }
+  return res.json();
+}
+
+function buildSystem(tone, extraCtx = '') {
+  return (TONES[tone] || TONES.jarvis) + BASE_CTX + extraCtx;
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// MAIN CHAT — STREAMING (SSE)
+// All intelligence goes through here
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+app.post('/api/chat', async (req, res) => {
+  const { message, history = [], tone = 'jarvis', model = 'llama-3.3-70b-versatile', hinglish = false, searchEnabled = true } = req.body;
+
+  if (!message || message.trim() === '') return res.status(400).json({ error: 'Message is empty' });
+
+  // ── Detect intent ──
+  const cleanHistory = (Array.isArray(history) ? history : [])
+    .filter(m => m && m.role && m.content && m.content.trim() !== '')
+    .slice(-40); // keep more context
+
+  const detected = detectIntent(message, cleanHistory);
+  const { model: chosenModel, maxTokens } = pickModel(detected.type, model);
+
+  // ── Load memories ──
+  const memories = await getMemories('kartik', 15);
+  let memCtx = '';
+  if (memories.length > 0) {
+    memCtx = '\n\nLong-term memory (from past sessions):\n' + memories.map(m => m.summary || m.content).filter(Boolean).slice(0, 10).join('\n');
   }
-}
 
-// Detect if query is about a specific website
-function extractSiteFromQuery(query) {
-  const q = query.toLowerCase().trim();
-  // Match patterns like "hammadtools.com", "about xyz.com", "xyz site info", "xyz website"
-  const domainMatch = query.match(/([a-zA-Z0-9-]+\.(com|in|net|org|co|io|pk|me|store|shop|xyz|dev|tech|online)(\.[a-z]{2})?)/i);
-  if(domainMatch) return domainMatch[0];
-  return null;
-}
+  // ── Build session context summary (for long convos) ──
+  let sessionCtx = '';
+  if (cleanHistory.length > 10) {
+    const recentTopics = cleanHistory.slice(-10).filter(m => m.role === 'user').map(m => m.content.slice(0, 80)).join(' | ');
+    sessionCtx = `\n\nRecent conversation topics: ${recentTopics}`;
+  }
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// WEB SEARCH ENDPOINT (upgraded with site analyzer)
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-app.post('/api/search', async (req,res) => {
-  try {
-    const { query, tone='jarvis', model='llama-3.3-70b-versatile' } = req.body;
+  // ── Hinglish ──
+  const hinglishCtx = hinglish ? '\n\nUser prefers Hinglish. Respond naturally in Hinglish.' : '';
 
-    // Check if user is asking about a specific site
-    const siteUrl = extractSiteFromQuery(query);
-    let siteContent = null;
-    let siteAnalysisCtx = '';
+  // ── Web search / site fetch if needed ──
+  let searchCtx = '';
+  let searchUsed = false;
+  let sources = [];
+  let siteAnalyzed = null;
 
-    if(siteUrl) {
-      // Try to fetch the actual site
-      siteContent = await fetchSiteContent(siteUrl);
-      if(siteContent) {
-        siteAnalysisCtx = `\n\nDIRECT SITE CONTENT from ${siteUrl}:\n${siteContent}\n\n`;
+  if (searchEnabled && detected.needsSearch) {
+    const siteUrl = extractSiteFromQuery(message);
+    if (siteUrl) {
+      const siteContent = await fetchSiteContent(siteUrl);
+      if (siteContent) {
+        searchCtx = `\n\nDirect content fetched from ${siteUrl}:\n${siteContent}`;
+        siteAnalyzed = siteUrl;
+        searchUsed = true;
       }
     }
+    if (!searchCtx) {
+      const results = await webSearch(message);
+      if (results.length > 0) {
+        searchCtx = '\n\nWeb search results:\n' + results.map((r, i) => `${i + 1}. ${r.title}\n${r.snippet}\nURL: ${r.url}`).join('\n\n');
+        sources = results;
+        searchUsed = true;
+      }
+    }
+  }
 
-    // Always also do web search for extra context
-    const results = await webSearch(query);
-    const searchSnippets = results.length > 0
-      ? results.map((r,i)=>`${i+1}. ${r.title}\n${r.snippet}\nURL: ${r.url}`).join('\n\n')
-      : 'No additional results found.';
+  // ── Intent-adaptive personality injection ──
+  const intentCtx = getIntentPersonality(detected.intent);
 
-    const fullCtx = siteAnalysisCtx
-      ? `${siteAnalysisCtx}\nAdditional web search results:\n${searchSnippets}`
-      : `\n\nReal-time web results for "${query}":\n${searchSnippets}`;
+  // ── Build system prompt ──
+  const sys = buildSystem(tone, memCtx + sessionCtx + hinglishCtx + searchCtx + intentCtx);
+  const messages = [{ role: 'system', content: sys }, ...cleanHistory, { role: 'user', content: message }];
 
-    const sys = buildSystem(tone, fullCtx);
+  // ── STREAM RESPONSE ──
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
 
-    // Special prompt for site analysis
-    const userPrompt = siteContent
-      ? `Analyze the website ${siteUrl} thoroughly. Extract and present ALL of the following IN DETAIL:
-1. 💼 What does this site/business do? (full description)
-2. 💰 PRICE LIST — List every product/service with exact prices found
-3. 📞 Contact Info — Phone numbers, WhatsApp, email, address
-4. 🌐 Social media links (Instagram, Facebook, etc.)
-5. 📦 Services/Products offered (complete list)
-6. ⭐ Any offers, discounts, or special deals
-7. 🕐 Working hours (if mentioned)
-8. 📍 Location/City
-Format clearly with sections. If any info is missing from the site, mention "Not found on site".`
-      : `Answer based on search results: ${query}`;
+  // Send metadata first so frontend knows intent/model
+  res.write(`data: ${JSON.stringify({ type: 'meta', intent: detected.intent, model: chosenModel, searchUsed, siteAnalyzed, sources })}\n\n`);
 
-    const data = await callGroq(
-      [{role:'system',content:sys},{role:'user',content:userPrompt}],
-      model, 2048
-    );
-
-    res.json({
-      reply: data.choices[0].message.content,
-      sources: results,
-      siteAnalyzed: siteUrl || null,
-      tokens: data.usage?.total_tokens
+  try {
+    const gr = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GROQ_KEY}` },
+      body: JSON.stringify({ model: chosenModel, messages, max_tokens: maxTokens, temperature: detected.temperature, stream: true })
     });
-  } catch(e){ res.status(500).json({error:e.message}); }
+
+    if (!gr.ok) {
+      const e = await gr.json();
+      res.write(`data: ${JSON.stringify({ type: 'error', error: e.error?.message || 'Groq error' })}\n\n`);
+      return res.end();
+    }
+
+    let fullReply = '';
+    gr.body.on('data', chunk => {
+      const lines = chunk.toString().split('\n').filter(l => l.startsWith('data: '));
+      for (const line of lines) {
+        const d = line.slice(6);
+        if (d === '[DONE]') { res.write('data: {"type":"done"}\n\n'); return; }
+        try {
+          const p = JSON.parse(d);
+          const t = p.choices?.[0]?.delta?.content;
+          if (t) { fullReply += t; res.write(`data: ${JSON.stringify({ type: 'token', token: t })}\n\n`); }
+        } catch (e) {}
+      }
+    });
+
+    gr.body.on('end', () => {
+      res.write('data: {"type":"done"}\n\n');
+      res.end();
+      // Save memory in background
+      const updHist = [...cleanHistory, { role: 'user', content: message }, { role: 'assistant', content: fullReply }];
+      generateMemorySummary(updHist).then(s => { if (s) saveMemory('kartik', message, s); });
+    });
+
+    gr.body.on('error', () => { res.write('data: {"type":"done"}\n\n'); res.end(); });
+
+  } catch (e) {
+    res.write(`data: ${JSON.stringify({ type: 'error', error: e.message })}\n\n`);
+    res.end();
+  }
 });
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// FILE UPLOAD (PDF + text + code)
+// FILE UPLOAD (PDF + images + text)
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-app.post('/api/upload', upload.single('file'), async (req,res) => {
+app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
-    const { instruction='Analyze this file thoroughly', tone='jarvis', model='llama-3.3-70b-versatile' } = req.body;
-    if(!req.file) return res.status(400).json({error:'No file uploaded'});
+    const { instruction = 'Analyze this file thoroughly', tone = 'jarvis' } = req.body;
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
     const filename = req.file.originalname;
     const mimetype = req.file.mimetype;
     let fileContent = '';
-    let fileType = 'text';
 
-    // ── PDF EXTRACTION ──
-    if(mimetype==='application/pdf' || filename.toLowerCase().endsWith('.pdf')) {
-      fileType = 'pdf';
+    if (mimetype === 'application/pdf' || filename.toLowerCase().endsWith('.pdf')) {
       try {
         const pdfData = await pdfParse(req.file.buffer);
-        fileContent = pdfData.text;
-        const info = `Pages: ${pdfData.numpages} | Words: ~${Math.round(fileContent.split(' ').length)}`;
-        fileContent = `[PDF extracted — ${info}]\n\n${fileContent}`;
-      } catch(e) {
-        fileContent = '[PDF extraction failed — may be scanned/image-based PDF]';
-      }
-    }
-    // ── IMAGE — redirect to vision ──
-    else if(mimetype.startsWith('image/')) {
+        fileContent = `[PDF — ${pdfData.numpages} pages, ~${Math.round(pdfData.text.split(' ').length)} words]\n\n${pdfData.text}`;
+      } catch (e) { fileContent = '[PDF extraction failed]'; }
+    } else if (mimetype.startsWith('image/')) {
       const b64 = req.file.buffer.toString('base64');
       const sys = buildSystem(tone);
       const vRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-        method:'POST',
-        headers:{'Content-Type':'application/json','Authorization':`Bearer ${GROQ_KEY}`},
-        body: JSON.stringify({ model:'llama-3.2-11b-vision-preview', messages:[{role:'system',content:sys},{role:'user',content:[{type:'image_url',image_url:{url:`data:${mimetype};base64,${b64}`}},{type:'text',text:instruction}]}], max_tokens:1024 })
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GROQ_KEY}` },
+        body: JSON.stringify({
+          model: 'llama-3.2-11b-vision-preview',
+          messages: [{ role: 'system', content: sys }, { role: 'user', content: [{ type: 'image_url', image_url: { url: `data:${mimetype};base64,${b64}` } }, { type: 'text', text: instruction }] }],
+          max_tokens: 1024
+        })
       });
-      if(!vRes.ok){ const e=await vRes.json(); throw new Error(e.error?.message); }
+      if (!vRes.ok) { const e = await vRes.json(); throw new Error(e.error?.message); }
       const vData = await vRes.json();
-      return res.json({ reply:vData.choices[0].message.content, fileType:'image' });
-    }
-    // ── TEXT / CODE / CSV / DOCX ──
-    else {
+      return res.json({ reply: vData.choices[0].message.content, fileType: 'image' });
+    } else {
       fileContent = req.file.buffer.toString('utf-8');
     }
 
-    // Truncate if too large
     const maxChars = 12000;
-    const truncated = fileContent.length > maxChars;
-    if(truncated) fileContent = fileContent.slice(0, maxChars) + `\n\n[... truncated — showing first ${maxChars} chars of ${fileContent.length} total]`;
+    if (fileContent.length > maxChars) fileContent = fileContent.slice(0, maxChars) + `\n\n[...truncated — showing first ${maxChars} of ${fileContent.length} chars]`;
 
     const sys = buildSystem(tone);
     const data = await callGroq([
-      {role:'system', content:sys},
-      {role:'user', content:`File: **${filename}**\n\n\`\`\`\n${fileContent}\n\`\`\`\n\nInstruction: ${instruction}`}
-    ], model, 2048);
+      { role: 'system', content: sys },
+      { role: 'user', content: `File: **${filename}**\n\`\`\`\n${fileContent}\n\`\`\`\n\nInstruction: ${instruction}` }
+    ], 'llama-3.3-70b-versatile', 2500, 0.6);
 
-    res.json({ reply:data.choices[0].message.content, fileType, tokens:data.usage?.total_tokens, truncated });
-  } catch(e){ res.status(500).json({error:e.message}); }
+    res.json({ reply: data.choices[0].message.content, fileType: 'file', tokens: data.usage?.total_tokens });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// VISION (direct image)
+// CODE EXECUTE
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-app.post('/api/vision', upload.single('image'), async (req,res) => {
-  try {
-    const { question='Analyze this image in detail', tone='jarvis' } = req.body;
-    if(!req.file) return res.status(400).json({error:'No image uploaded'});
-    const b64 = req.file.buffer.toString('base64');
-    const sys = buildSystem(tone);
-    const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':`Bearer ${GROQ_KEY}`},
-      body: JSON.stringify({ model:'llama-3.2-11b-vision-preview', messages:[{role:'system',content:sys},{role:'user',content:[{type:'image_url',image_url:{url:`data:${req.file.mimetype};base64,${b64}`}},{type:'text',text:question}]}], max_tokens:1024 })
-    });
-    if(!r.ok){ const e=await r.json(); throw new Error(e.error?.message); }
-    const data = await r.json();
-    res.json({ reply:data.choices[0].message.content });
-  } catch(e){ res.status(500).json({error:e.message}); }
-});
-
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// CODE EXECUTE (JS only safe)
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-app.post('/api/execute', async (req,res) => {
-  const { code, language='javascript' } = req.body;
-  if(language!=='javascript') return res.json({ output:`// ${language} execution: JARVIS will analyze your code instead.` });
-  let output='';
-  const con={log:(...a)=>output+=a.join(' ')+'\n',error:(...a)=>output+='ERROR: '+a.join(' ')+'\n',warn:(...a)=>output+='WARN: '+a.join(' ')+'\n'};
-  try { new Function('console',code)(con); res.json({output:output||'// No output'}); }
-  catch(e){ res.json({output:`Error: ${e.message}`}); }
+app.post('/api/execute', async (req, res) => {
+  const { code, language = 'javascript' } = req.body;
+  if (language !== 'javascript') return res.json({ output: `// ${language} execution not supported in sandbox. JARVIS will analyze your code instead.` });
+  let output = '';
+  const con = {
+    log: (...a) => output += a.join(' ') + '\n',
+    error: (...a) => output += 'ERROR: ' + a.join(' ') + '\n',
+    warn: (...a) => output += 'WARN: ' + a.join(' ') + '\n'
+  };
+  try { new Function('console', code)(con); res.json({ output: output || '// No output' }); }
+  catch (e) { res.json({ output: `Error: ${e.message}` }); }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, ()=>console.log(`⚡ JARVIS Mark III v3.1 — Port ${PORT} | Groq:${!!GROQ_KEY} | Serper:${!!SERPER_KEY} | Memory:${!!SUPABASE_URL}`));
+app.listen(PORT, () => console.log(`⚡ JARVIS v4.0 — Port ${PORT} | Groq:${!!GROQ_KEY} | Search:${!!SERPER_KEY} | Memory:${!!SUPABASE_URL}`));
+SERVEREOF
+echo "server written: $(wc -l < /home/claude/server_new.js) lines"
