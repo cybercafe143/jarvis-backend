@@ -157,14 +157,57 @@ function getIntentInjection(intent) {
   return map[intent] || map.general;
 }
 
+// ── SHORT PROMPT: simple/casual ke liye — saves ~800 tokens per request ──
+const JARVIS_SHORT = `You are JARVIS — Kartik ka personal AI assistant. Sharp, direct, no filler.
+Kartik: BCA student, LNCT Bhopal, runs CyberCafe143, builds AI projects.
+Rules: casual/greeting → MAX 2 sentences. No "sir sir sir". No forced questions. No padding.`;
+
+// ── Tiered system prompt (huge token saver) ──
+function buildSystemPrompt(complexity, tone, extraCtx=''){
+  const toneStr = TONES[tone]||'';
+  if(complexity === 'simple'){
+    // Short prompt for casual chat — saves ~800 tokens
+    return JARVIS_SHORT + toneStr + extraCtx;
+  }
+  return JARVIS_CORE + toneStr + extraCtx;
+}
+
 function pickModel(complexity) {
   const map = {
-    simple:   { model:'llama-3.1-8b-instant',    maxTokens:400  },
+    // FIX: Use 70b for simple too — same TPM limit but better quality
+    // 8b instant was hitting 6000 TPM with large prompts anyway
+    simple:   { model:'llama-3.3-70b-versatile', maxTokens:300  }, // short output
     standard: { model:'llama-3.3-70b-versatile', maxTokens:1500 },
     deep:     { model:'llama-3.3-70b-versatile', maxTokens:2800 },
     creative: { model:'llama-3.3-70b-versatile', maxTokens:2200 },
   };
   return map[complexity] || map.standard;
+}
+
+// ── Groq call with auto-retry on 429 ──
+async function callGroqStream(model, messages, maxTokens, temperature){
+  const maxRetries = 3;
+  for(let attempt = 0; attempt < maxRetries; attempt++){
+    const gr = await fetch('https://api.groq.com/openai/v1/chat/completions',{
+      method:'POST',
+      headers:{'Content-Type':'application/json', Authorization:`Bearer ${GROQ_KEY}`},
+      body:JSON.stringify({model, messages, max_tokens:maxTokens, temperature, stream:true})
+    });
+    if(gr.ok) return gr;
+    const err = await gr.json();
+    const errMsg = err.error?.message || '';
+    // Rate limit — extract wait time and retry
+    if(gr.status === 429){
+      const waitMatch = errMsg.match(/try again in ([\d.]+)s/i);
+      const waitSecs = waitMatch ? parseFloat(waitMatch[1]) : (attempt+1)*15;
+      console.log(`[Groq] Rate limit hit, waiting ${waitSecs}s (attempt ${attempt+1}/${maxRetries})`);
+      // Send a "waiting" token to frontend so user knows
+      await new Promise(r => setTimeout(r, waitSecs * 1000));
+      continue;
+    }
+    throw new Error(errMsg || `HTTP ${gr.status}`);
+  }
+  throw new Error('Rate limit — too many requests. Wait 1 minute and try again.');
 }
 
 // ══════════════════════════════════════════════════════
