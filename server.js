@@ -1,4 +1,3 @@
-cat > /mnt/user-data/outputs/server.js << 'EOF'
 const express    = require('express');
 const cors       = require('cors');
 const fetch      = require('node-fetch');
@@ -587,8 +586,3 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () =>
   console.log(`⚡ JARVIS v4.1 — Port ${PORT} | Groq:${!!GROQ_KEY} | Search:${!!SERPER_KEY} | Memory:${!!SUPABASE_URL}`)
 );
-EOF
-echo "Done: $(wc -l < /mnt/user-data/outputs/server.js) lines, $(wc -c < /mnt/user-data/outputs/server.js) bytes"
-Done
-
-You are out of free messages until 1:50 PM
