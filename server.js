@@ -567,7 +567,7 @@ app.post('/api/execute',(req,res)=>{
 const PORT=process.env.PORT||3000;
 const ELEVENLABS_KEY = process.env.ELEVENLABS_API_KEY || '';
 
-const VOICE_ID = 'onwK4e9ZLuTAKqWW03F9'; // Daniel — JARVIS style
+const VOICE_ID = 'TX3LPaxmHKxFdv7VOQHJ'; // Daniel — JARVIS style
 
 function cleanForTTS(text) {
   return text
