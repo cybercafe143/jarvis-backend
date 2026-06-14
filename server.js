@@ -446,7 +446,7 @@ function cleanForTTS(text) {
     .replace(/[-*+]\s/g, '')
     .replace(/━+/g, '')
     .trim()
-    .slice(0, 800);
+    .slice(0, 1200);
 }
 
 app.post('/api/speak', async (req, res) => {
