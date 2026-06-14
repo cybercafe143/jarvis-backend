@@ -142,7 +142,7 @@ function getIntentInjection(intent) {
 
 function pickModel(complexity) {
   return {
-    simple:   { model: 'llama-3.3-70b-versatile', maxTokens: 300  },
+    simple:   { model: 'llama-3.3-70b-versatile', maxTokens: 500  },
     standard: { model: 'llama-3.3-70b-versatile', maxTokens: 1500 },
     deep:     { model: 'llama-3.3-70b-versatile', maxTokens: 2800 },
     creative: { model: 'llama-3.3-70b-versatile', maxTokens: 2200 },
