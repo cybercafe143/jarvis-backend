@@ -433,7 +433,7 @@ app.post('/api/chat', async (req, res) => {
 // ══════════════════════════════════════════════════════
 //  ELEVENLABS TTS
 // ══════════════════════════════════════════════════════
-const VOICE_ID = 'TX3LPaxmHKxFdv7VOQHJ'; // Liam — natural male
+const VOICE_ID = 'IKne3meq5aSn9XLyUdCD'; // Liam — natural male
 
 function cleanForTTS(text) {
   return text
