@@ -565,4 +565,63 @@ app.post('/api/execute',(req,res)=>{
 });
 
 const PORT=process.env.PORT||3000;
+const ELEVENLABS_KEY = process.env.ELEVENLABS_API_KEY || '';
+
+const VOICE_ID = 'onwK4e9ZLuTAKqWW03F9'; // Daniel — JARVIS style
+
+function cleanForTTS(text) {
+  return text
+    .replace(/```[\s\S]*?```/g, 'Here is the code.')
+    .replace(/`[^`]+`/g, '')
+    .replace(/#{1,6}\s/g, '')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*]+)\*/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/[-*+]\s/g, '')
+    .replace(/━+/g, '')
+    .trim()
+    .slice(0, 800);
+}
+
+app.post('/api/speak', async (req, res) => {
+  if (!ELEVENLABS_KEY) return res.status(400).json({ error: 'No key' });
+  const { text } = req.body;
+  if (!text) return res.status(400).json({ error: 'No text' });
+
+  const cleaned = cleanForTTS(text);
+
+  try {
+    const response = await fetch(
+      `https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}/stream`,
+      {
+        method: 'POST',
+        headers: {
+          'xi-api-key': ELEVENLABS_KEY,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          text: cleaned,
+          model_id: 'eleven_turbo_v2',
+          voice_settings: {
+            stability: 0.5,
+            similarity_boost: 0.75,
+            style: 0.3,
+            use_speaker_boost: true,
+          },
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      const err = await response.json();
+      return res.status(500).json({ error: err.detail?.message || 'ElevenLabs error' });
+    }
+
+    res.setHeader('Content-Type', 'audio/mpeg');
+    response.body.pipe(res);
+
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 app.listen(PORT,()=>console.log(`⚡ JARVIS v4.2 — Port ${PORT} | Groq:${!!GROQ_KEY} | Search:${!!SERPER_KEY} | Memory:${!!SUPABASE_URL}`));
