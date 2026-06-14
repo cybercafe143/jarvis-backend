@@ -583,12 +583,33 @@ function cleanForTTS(text) {
     .slice(0, 800);
 }
 
+const VOICE_ID = 'TX3LPaxmHKxFdv7VOQHJ'; // Liam
+
+function cleanForTTS(text) {
+  return text
+    .replace(/```[\s\S]*?```/g, 'Here is the code.')
+    .replace(/`[^`]+`/g, '')
+    .replace(/#{1,6}\s/g, '')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*]+)\*/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/[-*+]\s/g, '')
+    .replace(/━+/g, '')
+    .trim()
+    .slice(0, 800);
+}
+
 app.post('/api/speak', async (req, res) => {
-  if (!ELEVENLABS_KEY) return res.status(400).json({ error: 'No key' });
+  if (!ELEVENLABS_KEY) {
+    console.log('No ElevenLabs key!');
+    return res.status(400).json({ error: 'No key' });
+  }
+  
   const { text } = req.body;
   if (!text) return res.status(400).json({ error: 'No text' });
 
   const cleaned = cleanForTTS(text);
+  console.log('TTS request:', cleaned.slice(0, 50));
 
   try {
     const response = await fetch(
@@ -598,30 +619,35 @@ app.post('/api/speak', async (req, res) => {
         headers: {
           'xi-api-key': ELEVENLABS_KEY,
           'Content-Type': 'application/json',
+          'Accept': 'audio/mpeg',
         },
         body: JSON.stringify({
           text: cleaned,
-          model_id: 'eleven_turbo_v2',
+          model_id: 'eleven_multilingual_v2',
           voice_settings: {
-            stability: 0.5,
-            similarity_boost: 0.75,
-            style: 0.3,
+            stability: 0.35,
+            similarity_boost: 0.85,
+            style: 0.45,
             use_speaker_boost: true,
           },
         }),
       }
     );
 
+    console.log('ElevenLabs status:', response.status);
+
     if (!response.ok) {
-      const err = await response.json();
-      return res.status(500).json({ error: err.detail?.message || 'ElevenLabs error' });
+      const err = await response.text();
+      console.log('ElevenLabs error:', err);
+      return res.status(500).json({ error: 'ElevenLabs failed: ' + err });
     }
 
     res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Transfer-Encoding', 'chunked');
     response.body.pipe(res);
 
   } catch (e) {
+    console.log('Speak error:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
-app.listen(PORT,()=>console.log(`⚡ JARVIS v4.2 — Port ${PORT} | Groq:${!!GROQ_KEY} | Search:${!!SERPER_KEY} | Memory:${!!SUPABASE_URL}`));
